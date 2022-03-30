@@ -55,7 +55,7 @@ def get_screen_bbox(sct):
         left = mon['left']
         top = mon['top']
         right = mon['left'] + mon['width']
-        bottom = mon['top'] + mon['width']
+        bottom = mon['top'] + mon['height']
     """
     mon = sct.monitors[MONITOR_NUM]
 
