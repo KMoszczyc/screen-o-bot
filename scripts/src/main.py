@@ -2,7 +2,19 @@ import os
 import pyautogui as gui
 import time
 import datetime as dt
-import winsound
+import sys
+import mss
+import mss.tools
+import numpy as np
+import cv2
+from skimage.metrics import structural_similarity as compare_ssim
+from argparse import ArgumentParser
+from pathlib import Path
+
+print(os.getcwd())
+print(Path(os.getcwd()).parents[0])
+print(Path(os.getcwd()).parents[1])
+print(str(Path(os.getcwd()).parents[1]) + '/screens')
 
 # Time between pyautogui commands
 gui.PAUSE = 0.05
@@ -21,12 +33,47 @@ excluded_comparison_confidence = 0.95
 
 # Default folder for screens
 # TODO: some input method instead of hardcoding it
-# save_path = os.path.expanduser('~') + r"\Desktop\pyscreens"
-# save_path = os.path.expanduser('~') + r"\OneDrive - Politechnika Wroclawska\II stopien\9 sem\pyscreens"
-save_path = "D:\OneDrive - Politechnika Wroclawska\II stopien\9 sem\pyscreens"
+ROOT = str(Path(os.getcwd()).parents[1])
+SCREENS_PATH = ROOT + '/screens'
+
+MONITOR_NUM = 1  # 0 - for all monitors, 1 - left monitor, 2 - right monitor
+SCREEN_SIZES = [(1920, 1080), (2560, 1440)]  # left and right monitor
 
 # Default folder name, set after invoking create_dated_folder() method
 folder_name = ""
+previous_frame = []
+
+print('save path', SCREENS_PATH)
+
+
+def get_screen_bbox(sct):
+    """
+    Some magic code for dual screen setup, where left monitor is 1920x1080 and right monitor is 2560x1440.
+    Left one has 100% scale, right one has 125%, hence why there is magic 56 in code below.
+
+    For monitors with same size and scale, all of it could be simplified to:
+        left = mon['left']
+        top = mon['top']
+        right = mon['left'] + mon['width']
+        bottom = mon['top'] + mon['width']
+    """
+    mon = sct.monitors[MONITOR_NUM]
+
+    # The screen part to capture
+    left = -SCREEN_SIZES[MONITOR_NUM - 1][0] if MONITOR_NUM == 1 else mon['left']
+    top = mon['top'] - 56 if MONITOR_NUM == 1 else mon['top']
+    right = left + mon['width'] if MONITOR_NUM == 0 else left + SCREEN_SIZES[MONITOR_NUM - 1][0]
+    bottom = top + mon['height'] if MONITOR_NUM == 0 else top + SCREEN_SIZES[MONITOR_NUM - 1][1]
+
+    return left, top, right, bottom
+
+
+def create_screens_folder():
+    os.umask(0)
+    print(SCREENS_PATH)
+    if not os.path.exists(SCREENS_PATH):
+        print('Create screens dir')
+        os.makedirs(SCREENS_PATH, mode=0o777)
 
 
 def get_main_folder_path():
@@ -61,22 +108,31 @@ def create_dated_folder():
     global folder_name
     folder_name = "\\" + dt.datetime.now().strftime("%Y-%m-%d %H.%M")
     try:
-        os.makedirs(save_path + folder_name)
-        print(save_path + folder_name)
+        os.makedirs(SCREENS_PATH + folder_name)
+        print(SCREENS_PATH + folder_name)
     except FileExistsError:
         pass
 
 
-def take_screenshot():
+def take_screenshot(sct):
     """
     Takes screenshot of the specified screen region
     """
+    global previous_frame
+
     # TODO: check best time_between_screenshots time
     # TODO: implement something to specify screen region instead of hardcoding it
     increment_counter()
-    myscreenshot = gui.screenshot(region=(5, 30, 1700, 1020))
-    myscreenshot.save(save_path + folder_name + fr"\screenshot_{counter}.png")
+    output_path = SCREENS_PATH + folder_name + fr"\screenshot_{counter}.png"
+    bbox = get_screen_bbox(sct)
+
+    # Grab the data
+    sct_img = sct.grab(bbox)
+    previous_frame = cv2.cvtColor(np.array(sct_img), cv2.COLOR_RGB2BGR)
+    mss.tools.to_png(sct_img.rgb, sct_img.size, output=output_path)
     time.sleep(time_between_screenshots)
+
+    print('screenshot:', counter, '-', dt.datetime.now().strftime("%H:%M:%S"))
 
 
 def play_notification_sound():
@@ -109,7 +165,7 @@ def sth_excluded_is_on_screen():
     return False
 
 
-def screen_has_changed():
+def screen_has_changed(sct):
     """
     Checks if current screen state is similar to latest screenshot
     returns true if there is difference between current, and previous screenshot
@@ -118,9 +174,13 @@ def screen_has_changed():
     """
     while True:
         try:
-            loc = gui.locateOnScreen(save_path + folder_name + fr"\screenshot_{counter}.png",
-                                     confidence=comparison_confidence)
-            return not bool(loc)
+            bbox = get_screen_bbox(sct)
+            current_frame = cv2.cvtColor(np.array(sct.grab(bbox)), cv2.COLOR_RGB2BGR)
+
+            (score, diff) = compare_ssim(current_frame, previous_frame, full=True, multichannel=True)
+
+            return score < comparison_confidence
+
         except gui.ImageNotFoundException:
             return True
         except IOError:
@@ -144,20 +204,29 @@ def main_loop():
     Main program loop
     Stops when mouse is moved to upper left corner of the screen
     """
-    create_dated_folder()
-    take_screenshot()
-    print("program works")
-    while True:
-        time.sleep(0.2)
-        try:
-            check_for_program_termination()
-        except gui.FailSafeException:
-            gui.alert(text="Program has been stopped", title="Program terminated")
-            exit()
-        if screen_has_changed() and not sth_excluded_is_on_screen():
-            take_screenshot()
-            # play_notification_sound()
+    with mss.mss() as sct:
+        create_screens_folder()
+        create_dated_folder()
+        take_screenshot(sct)
+        print("program works")
+        while True:
+            time.sleep(0.2)
+            try:
+                check_for_program_termination()
+            except gui.FailSafeException:
+                gui.alert(text="Program has been stopped", title="Program terminated")
+                exit()
+            if screen_has_changed(sct) and not sth_excluded_is_on_screen():
+                take_screenshot(sct)
+                # play_notification_sound()
 
 
 if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument('-m', '--monitor_num', default=1, required=False,
+                        help="Specify the monitor to be caputured (1: left, 2: right) - default: 1")
+
+    args = parser.parse_args()
+    MONITOR_NUM = int(args.monitor_num)
+
     main_loop()
